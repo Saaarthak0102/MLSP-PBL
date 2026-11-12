@@ -1,4 +1,4 @@
-# HRI/CMD — Human-Robot Interaction via Voice + Gesture (MLSP PBL)
+# GestVox — control a robot with your voice and hand (MLSP PBL)
 
 Live demo: *(add Streamlit Cloud URL after deploy)*
 

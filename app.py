@@ -31,7 +31,7 @@ START = (GRID // 2, GRID // 2)
 ARROW = {"left": "←", "right": "→", "up": "↑", "down": "↓"}
 VEC = {"left": (-1, 0), "right": (1, 0), "up": (0, 1), "down": (0, -1)}
 
-st.set_page_config(page_title="HRI/CMD", page_icon="▮", layout="wide")
+st.set_page_config(page_title="GestVox · voice + gesture robot control", page_icon="▮", layout="wide")
 st.markdown(f"""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500&display=swap');
@@ -327,7 +327,7 @@ def render_session(R):
 
 
 # ============================================================================= LAYOUT
-st.markdown('<div class="hdr">HRI/CMD <span>· say <b>how many</b> · gesture <b>which way</b> · robot obeys</span></div>', unsafe_allow_html=True)
+st.markdown('<div class="hdr">GESTVOX <span>· speak the distance · gesture the direction · robot obeys</span></div>', unsafe_allow_html=True)
 left, right = st.columns(2, gap="large")
 
 with left:

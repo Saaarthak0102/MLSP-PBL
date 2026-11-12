@@ -1,5 +1,5 @@
 """
-Human-Robot Interaction using Voice + Gesture Recognition  (MLSP PBL)
+GestVox: Human-Robot Interaction using Voice + Gesture Recognition  (MLSP PBL)
 =====================================================================
 Single-file implementation: datasets -> signal processing -> features ->
 ML models -> comparison -> confidence-weighted late fusion -> noise study.
