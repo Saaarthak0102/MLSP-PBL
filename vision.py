@@ -14,9 +14,8 @@ import cv2
 import numpy as np
 
 W, H = 160, 120
-GESTURES = ["swipe_left", "swipe_right", "swipe_up", "swipe_down", "open_palm", "fist"]
-GESTURE_TO_CMD = {"swipe_left": "left", "swipe_right": "right", "swipe_up": "up",
-                  "swipe_down": "down", "open_palm": "go", "fist": "stop"}
+GESTURES = ["swipe_left", "swipe_right", "swipe_up", "swipe_down"]
+GESTURE_TO_CMD = {"swipe_left": "left", "swipe_right": "right", "swipe_up": "up", "swipe_down": "down"}
 FEATURE_NAMES = ["dx", "dy", "path", "fingers", "solidity", "area", "motion", "detect", "std_x", "std_y"]
 
 _FACE = None

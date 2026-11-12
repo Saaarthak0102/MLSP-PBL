@@ -44,12 +44,13 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(ROOT, "data")
 MODEL_DIR = os.path.join(ROOT, "models")
 
-COMMANDS = ["go", "stop", "left", "right", "up", "down"]
-# EMG class id -> command  (2 fist, 3 wrist flexion, 4 wrist extension,
-#                           5 radial deviation, 6 ulnar deviation, 7 extended palm)
-GESTURE_TO_CMD = {7: "go", 2: "stop", 5: "left", 6: "right", 4: "up", 3: "down"}
-GESTURE_NAMES = {"go": "open palm", "stop": "fist", "left": "radial dev.",
-                 "right": "ulnar dev.", "up": "wrist ext.", "down": "wrist flex."}
+UNITS = ["one", "two", "three", "four", "five"]          # voice -> how many cells (1..5)
+UNIT_VALUE = {w: i + 1 for i, w in enumerate(UNITS)}
+DIRS = ["left", "right", "up", "down"]                   # gesture -> direction
+# EMG class id -> direction (3 wrist flexion, 4 wrist extension, 5 radial dev., 6 ulnar dev.)
+GESTURE_TO_CMD = {5: "left", 6: "right", 4: "up", 3: "down"}
+GESTURE_NAMES = {"left": "radial dev.", "right": "ulnar dev.", "up": "wrist ext.", "down": "wrist flex."}
+COMMANDS = DIRS
 
 SR = 16000          # voice sample rate
 EMG_FS = 200        # gesture sample rate
@@ -63,13 +64,24 @@ URL_EMG = "https://archive.ics.uci.edu/static/public/481/emg+data+for+gestures.z
 # --------------------------------------------------------------------------
 # Data
 # --------------------------------------------------------------------------
+URL_SPEECH_FULL = "http://download.tensorflow.org/data/speech_commands_v0.02.tar.gz"
+
+
 def download_data():
-    sp = os.path.join(DATA_DIR, "speech")
-    if not os.path.isdir(os.path.join(sp, "go")):
-        print("downloading Speech Commands test set (~110MB)...")
-        raw = urllib.request.urlopen(URL_SPEECH).read()
-        os.makedirs(sp, exist_ok=True)
-        tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz").extractall(sp)
+    """Voice: stream the full Speech Commands v0.02 archive (2.3 GB), keep only the 5 number words."""
+    sp = os.path.join(DATA_DIR, "speech_full")
+    if not all(os.path.isdir(os.path.join(sp, w)) for w in UNITS):
+        print("streaming Speech Commands v0.02 (2.3 GB), keeping:", UNITS)
+        tf = tarfile.open(fileobj=urllib.request.urlopen(URL_SPEECH_FULL), mode="r|gz")
+        n = 0
+        for m in tf:
+            parts = m.name.split("/")
+            if m.isfile() and len(parts) >= 2 and parts[-2] in UNITS and m.name.endswith(".wav"):
+                d = os.path.join(sp, parts[-2]); os.makedirs(d, exist_ok=True)
+                with open(os.path.join(d, parts[-1]), "wb") as f:
+                    f.write(tf.extractfile(m).read())
+                n += 1
+        print("extracted", n, "clips")
     em = os.path.join(DATA_DIR, "emg")
     if not os.path.isdir(em):
         print("downloading UCI EMG gestures...")
@@ -78,10 +90,10 @@ def download_data():
         zipfile.ZipFile(io.BytesIO(raw)).extractall(em)
 
 
-def load_voice_dataset(max_per_class=400):
+def load_voice_dataset(max_per_class=800):
     X, y = [], []
-    for ci, cmd in enumerate(COMMANDS):
-        files = sorted(glob.glob(os.path.join(DATA_DIR, "speech", cmd, "*.wav")))[:max_per_class]
+    for ci, cmd in enumerate(UNITS):
+        files = sorted(glob.glob(os.path.join(DATA_DIR, "speech_full", cmd, "*.wav")))[:max_per_class]
         for f in files:
             sr, w = wavfile.read(f)
             w = w.astype(np.float32) / 32768.0
@@ -111,7 +123,7 @@ def load_emg_dataset(max_per_class_per_subject=60):
                 c = int(lab[s])
                 if c not in GESTURE_TO_CMD:
                     continue
-                cmd_i = COMMANDS.index(GESTURE_TO_CMD[c])
+                cmd_i = DIRS.index(GESTURE_TO_CMD[c])
                 for a in range(s, e - EMG_WIN + 1, EMG_STRIDE):
                     if counts.get(c, 0) >= max_per_class_per_subject:
                         break
@@ -271,7 +283,7 @@ def make_models():
     }
 
 
-def evaluate(model, Xte, yte):
+def evaluate(model, Xte, yte, n_classes=None):
     from sklearn.metrics import accuracy_score, confusion_matrix, precision_recall_fscore_support
     t = time.perf_counter()
     pred = model.predict(Xte)
@@ -279,7 +291,7 @@ def evaluate(model, Xte, yte):
     p, r, f, _ = precision_recall_fscore_support(yte, pred, average="macro", zero_division=0)
     return {"accuracy": float(accuracy_score(yte, pred)), "precision": float(p), "recall": float(r),
             "f1": float(f), "latency_ms": float(ms),
-            "confusion": confusion_matrix(yte, pred, labels=range(len(COMMANDS))).tolist()}
+            "confusion": confusion_matrix(yte, pred, labels=range(n_classes or len(set(yte)))).tolist()}
 
 
 def entropy_weight(p):
@@ -311,9 +323,9 @@ def train():
     import joblib
     os.makedirs(MODEL_DIR, exist_ok=True)
     rng = np.random.default_rng(0)
-    results = {"commands": COMMANDS, "gesture_names": GESTURE_NAMES}
+    results = {"units": UNITS, "dirs": DIRS, "gesture_names": GESTURE_NAMES}
 
-    # ---- VOICE ----
+    # ---- VOICE (how many units) ----
     print("[voice] loading + feature extraction")
     Xr, yv = load_voice_dataset()
     idx = np.arange(len(yv))
@@ -326,14 +338,14 @@ def train():
     vmodels = make_models()
     for name, m in vmodels.items():
         m.fit(Fv_tr, yv[tr])
-        results["voice"]["models"][name] = evaluate(m, Fv_te, yv[te])
+        results["voice"]["models"][name] = evaluate(m, Fv_te, yv[te], len(UNITS))
         m2 = make_models()[name].fit(Fv_tr_nof, yv[tr])
         results["voice"]["ablation"][name] = {"with_dsp": results["voice"]["models"][name]["accuracy"],
-                                              "without_dsp": evaluate(m2, Fv_te_nof, yv[te])["accuracy"]}
+                                              "without_dsp": evaluate(m2, Fv_te_nof, yv[te], len(UNITS))["accuracy"]}
         print(f"  {name:14s} acc={results['voice']['models'][name]['accuracy']:.3f}  "
               f"(no DSP {results['voice']['ablation'][name]['without_dsp']:.3f})")
 
-    # ---- GESTURE ----
+    # ---- GESTURE: EMG benchmark (direction) ----
     print("[gesture] loading + feature extraction")
     Wr, yg, subj = load_emg_dataset()
     tr_g = subj <= 26
@@ -346,14 +358,13 @@ def train():
     gmodels = make_models()
     for name, m in gmodels.items():
         m.fit(Fg[tr_g], yg[tr_g])
-        results["gesture"]["models"][name] = evaluate(m, Fg[te_g], yg[te_g])
+        results["gesture"]["models"][name] = evaluate(m, Fg[te_g], yg[te_g], len(DIRS))
         m2 = make_models()[name].fit(Fg_nof[tr_g], yg[tr_g])
         results["gesture"]["ablation"][name] = {"with_dsp": results["gesture"]["models"][name]["accuracy"],
-                                                "without_dsp": evaluate(m2, Fg_nof[te_g], yg[te_g])["accuracy"]}
+                                                "without_dsp": evaluate(m2, Fg_nof[te_g], yg[te_g], len(DIRS))["accuracy"]}
         print(f"  {name:14s} acc={results['gesture']['models'][name]['accuracy']:.3f}  "
               f"(no DSP {results['gesture']['ablation'][name]['without_dsp']:.3f})")
 
-    # ---- pick best per modality, save ----
     best_v = max(results["voice"]["models"], key=lambda k: results["voice"]["models"][k]["f1"])
     best_g = max(results["gesture"]["models"], key=lambda k: results["gesture"]["models"][k]["f1"])
     results["best"] = {"voice": best_v, "gesture": best_g}
@@ -361,49 +372,69 @@ def train():
     joblib.dump(gmodels[best_g], os.path.join(MODEL_DIR, "gesture.joblib"), compress=3)
     print(f"best voice={best_v}  best gesture={best_g}")
 
-    # ---- FUSION + NOISE STUDY ----
-    # pair each voice test clip with a random gesture test window of the same command
-    print("[fusion] noise sweep")
+    # ---- JOINT COMMAND STUDY: (units from voice) + (direction from gesture) ----
+    print("[joint] noise sweep + rejection")
     te_idx = np.flatnonzero(te_g)
-    pair_g = np.empty(len(te), dtype=int)
-    for k, i in enumerate(te):
-        pair_g[k] = rng.choice(te_idx[yg[te_idx] == yv[i]])
-    ypair = yv[te]
-    snrs = [None, 20, 10, 5, 0, -5]
-    modes = ["voice", "gesture", "average", "confidence"]
-    sweep = {"snr": ["clean" if s is None else s for s in snrs],
-             "voice_noisy": {m: [] for m in modes}, "gesture_noisy": {m: [] for m in modes}}
+    pair_dir = rng.integers(0, len(DIRS), len(te))
+    pair_g = np.array([rng.choice(te_idx[yg[te_idx] == d]) for d in pair_dir])
     mv, mg = vmodels[best_v], gmodels[best_g]
     p_g_clean = mg.predict_proba(Fg[pair_g])
     p_v_clean = mv.predict_proba(Fv_te)
+    yu, yd = yv[te], pair_dir
+
+    def joint_acc(pv, pg):
+        return float(((pv.argmax(1) == yu) & (pg.argmax(1) == yd)).mean())
+
+    snrs = [None, 20, 10, 5, 0]
+    sweep = {"snr": ["clean" if s is None else s for s in snrs],
+             "voice_noisy": {"units_only": [], "direction_only": [], "joint": []},
+             "gesture_noisy": {"units_only": [], "direction_only": [], "joint": []}}
     for s in snrs:
-        # voice degraded, gesture clean
-        Fn = np.array([voice_features(add_noise(Xr[i], s, rng)) for i in te])
-        pv = mv.predict_proba(Fn)
-        for m in modes:
-            sweep["voice_noisy"][m].append(acc(fuse(pv, p_g_clean, m), ypair))
-        # gesture degraded, voice clean
-        Gn = np.array([emg_features(add_noise(Wr[j], s, rng)) for j in pair_g])
-        pg = mg.predict_proba(Gn)
-        for m in modes:
-            sweep["gesture_noisy"][m].append(acc(fuse(p_v_clean, pg, m), ypair))
-        print(f"  SNR={s}: voice-noisy conf-fusion={sweep['voice_noisy']['confidence'][-1]:.3f} "
-              f"(voice only {sweep['voice_noisy']['voice'][-1]:.3f}) | gesture-noisy conf-fusion="
-              f"{sweep['gesture_noisy']['confidence'][-1]:.3f} (gesture only {sweep['gesture_noisy']['gesture'][-1]:.3f})")
+        pv = mv.predict_proba(np.array([voice_features(add_noise(Xr[i], s, rng)) for i in te]))
+        sweep["voice_noisy"]["units_only"].append(acc(pv, yu))
+        sweep["voice_noisy"]["direction_only"].append(acc(p_g_clean, yd))
+        sweep["voice_noisy"]["joint"].append(joint_acc(pv, p_g_clean))
+        pg = mg.predict_proba(np.array([emg_features(add_noise(Wr[j], s, rng)) for j in pair_g]))
+        sweep["gesture_noisy"]["units_only"].append(acc(p_v_clean, yu))
+        sweep["gesture_noisy"]["direction_only"].append(acc(pg, yd))
+        sweep["gesture_noisy"]["joint"].append(joint_acc(p_v_clean, pg))
+        print(f"  SNR={s}: voice-noisy joint={sweep['voice_noisy']['joint'][-1]:.3f} | "
+              f"gesture-noisy joint={sweep['gesture_noisy']['joint'][-1]:.3f}")
     results["fusion"] = sweep
+
+    # confidence gating: execute only if BOTH modalities are confident, else ask to repeat
+    cv_, cg_ = p_v_clean.max(1), p_g_clean.max(1)
+    ok = (p_v_clean.argmax(1) == yu) & (p_g_clean.argmax(1) == yd)
+    gate = {"threshold": [], "coverage": [], "accuracy_accepted": [], "wrong_moves_avoided": []}
+    for th in np.linspace(0.3, 0.95, 14):
+        accepted = (cv_ >= th) & (cg_ >= th)
+        gate["threshold"].append(float(th))
+        gate["coverage"].append(float(accepted.mean()))
+        gate["accuracy_accepted"].append(float(ok[accepted].mean()) if accepted.any() else None)
+        gate["wrong_moves_avoided"].append(float((~ok & ~accepted).sum() / max((~ok).sum(), 1)))
+    results["gating"] = gate
+    results["joint_clean"] = joint_acc(p_v_clean, p_g_clean)
+    print(f"joint clean accuracy = {results['joint_clean']:.3f}")
 
     # ---- demo samples for the app ----
     sdir = os.path.join(ROOT, "assets", "samples")
     os.makedirs(sdir, exist_ok=True)
-    for ci, cmd in enumerate(COMMANDS):
+    for f in glob.glob(os.path.join(sdir, "*.wav")):
+        os.remove(f)
+    for ci, cmd in enumerate(UNITS):
         for k, i in enumerate(te[yv[te] == ci][:3]):
             wavfile.write(os.path.join(sdir, f"{cmd}_{k}.wav"), SR, (Xr[i] * 32767).astype(np.int16))
     sel = []
-    for ci in range(len(COMMANDS)):
+    for ci in range(len(DIRS)):
         sel += list(te_idx[yg[te_idx] == ci][:4])
     np.savez_compressed(os.path.join(sdir, "emg_samples.npz"), windows=Wr[sel], labels=yg[sel])
 
-    with open(os.path.join(MODEL_DIR, "results.json"), "w") as f:
+    rp = os.path.join(MODEL_DIR, "results.json")
+    if os.path.exists(rp):
+        prev = json.load(open(rp))
+        if "camera" in prev and prev["camera"].get("gestures") == ["swipe_left", "swipe_right", "swipe_up", "swipe_down"]:
+            results["camera"] = prev["camera"]
+    with open(rp, "w") as f:
         json.dump(results, f, indent=1)
     print("saved models/ + results.json")
 
