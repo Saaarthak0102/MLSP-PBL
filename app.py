@@ -63,21 +63,38 @@ def style(fig, h=260):
     return fig
 
 
+def _mt(*names):
+    """Modification-time key so a retrain is picked up without restarting the server."""
+    return tuple(os.path.getmtime(os.path.join(P.MODEL_DIR, n)) for n in names if os.path.exists(os.path.join(P.MODEL_DIR, n)))
+
+
 @st.cache_resource
-def load_models():
+def _load_models(_k):
     return (joblib.load(os.path.join(P.MODEL_DIR, "voice.joblib")),
             joblib.load(os.path.join(P.MODEL_DIR, "gesture.joblib")))
 
 
 @st.cache_resource
-def load_cam():
+def _load_cam(_k):
     return joblib.load(os.path.join(P.MODEL_DIR, "cam_gesture.joblib"))
 
 
 @st.cache_data
-def load_results():
+def _load_results(_k):
     with open(os.path.join(P.MODEL_DIR, "results.json")) as f:
         return json.load(f)
+
+
+def load_models():
+    return _load_models(_mt("voice.joblib", "gesture.joblib"))
+
+
+def load_cam():
+    return _load_cam(_mt("cam_gesture.joblib"))
+
+
+def load_results():
+    return _load_results(_mt("results.json"))
 
 
 @st.cache_data
@@ -305,7 +322,7 @@ def render_session(R):
         if c2.button("retrain camera models now"):
             with st.spinner("training…"):
                 P.train_cam(n_per_class=100)
-            load_cam.clear(); load_results.clear()
+            _load_cam.clear(); _load_results.clear()
             st.success("retrained — record again to use the new models")
 
 
