@@ -51,9 +51,14 @@ def find_faces(frames):
     return [tuple(int(v) for v in r) for r in f]
 
 
-def hand_in_frame(frame, faces):
-    """Return dict(contour, centroid, area, fingers, solidity, mask) or None."""
+def hand_in_frame(frame, faces, motion=None):
+    """Return dict(contour, centroid, area, fingers, solidity, mask) or None.
+    motion: binary mask of pixels that changed since the previous frame. Hand = skin AND moving, which
+    removes the static face / neck / arm and keeps only the part that is actually swiping."""
     m = skin_mask(frame)
+    if motion is not None:
+        m = cv2.bitwise_and(m, motion)
+        m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7)), iterations=2)
     for (x, y, w, h) in faces:                 # blank out the face (slightly enlarged)
         px, py = int(w * .25), int(h * .35)
         m[max(y - py, 0):y + h + py, max(x - px, 0):x + w + px] = 0
@@ -96,9 +101,16 @@ def analyze(frames):
     prev = None
     motion = []
     for fr in frames:
-        h = hand_in_frame(fr, faces)
         g = cv2.GaussianBlur(cv2.cvtColor(fr, cv2.COLOR_BGR2GRAY), (5, 5), 0)
-        motion.append(float(np.abs(g.astype(np.float32) - prev).mean()) if prev is not None else 0.0)
+        if prev is not None:
+            diff = np.abs(g.astype(np.float32) - prev)
+            motion.append(float(diff.mean()))
+            mm = (diff > 12).astype(np.uint8) * 255
+            mm = cv2.dilate(mm, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9)), iterations=2)
+            h = hand_in_frame(fr, faces, mm)
+        else:
+            motion.append(0.0)
+            h = None                       # first frame has no motion reference
         prev = g.astype(np.float32)
         ov = fr.copy()
         for (x, y, w, hh) in faces:

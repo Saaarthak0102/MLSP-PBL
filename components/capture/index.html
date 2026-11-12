@@ -20,14 +20,14 @@
   <div id="stage"><video id="v" playsinline muted></video><div id="idle">camera + mic preview<br>appears after you press start</div>
     <div id="guide"></div><div id="count"></div><div id="bar"></div></div>
   <div id="side">
-    <button id="go">▶ start (3 s capture)</button>
+    <button id="go">▶ start (≤2 s capture)</button>
     <div id="msg">Say one command (go / stop / left / right / up / down) and, at the same time, show a hand gesture:
       swipe left / right / up / down, hold an open palm (go) or a fist (stop). Keep your hand in front of your face, inside the dashed box.</div>
   </div>
 </div>
 <canvas id="c" width="160" height="120"></canvas>
 <script>
-const DUR = 3000, FPS = 10, TARGET_SR = 16000;
+const DUR = 2000, MIN_MS = 1200, HANG_MS = 450, FPS = 10, TARGET_SR = 16000;
 const $ = id => document.getElementById(id);
 const send = (type, data) => window.parent.postMessage(Object.assign({isStreamlitMessage:true, type}, data), "*");
 const setH = () => send("streamlit:setFrameHeight", {height: 270});
@@ -52,7 +52,11 @@ $("go").onclick = async () => {
   const v=$("v"); v.srcObject=stream; await v.play(); v.style.display="block"; $("idle").style.display="none"; $("guide").style.display="block"; $("count").style.display="block";
   // audio
   const ac = new (window.AudioContext||window.webkitAudioContext)(); const src = ac.createMediaStreamSource(new MediaStream(stream.getAudioTracks()));
-  const proc = ac.createScriptProcessor(4096,1,1); const chunks=[]; proc.onaudioprocess = e => chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+  const proc = ac.createScriptProcessor(4096,1,1); const chunks=[]; let floor=1, spoke=false, lastVoice=0;
+  proc.onaudioprocess = e => { const d=new Float32Array(e.inputBuffer.getChannelData(0)); chunks.push(d);
+    let sum=0; for(let i=0;i<d.length;i++) sum+=d[i]*d[i]; const rms=Math.sqrt(sum/d.length);
+    floor=Math.min(floor, Math.max(rms,1e-4)); const thr=Math.max(0.015, floor*4);
+    if(rms>thr){ spoke=true; lastVoice=performance.now(); } };
   const mute = ac.createGain(); mute.gain.value=0; src.connect(proc); proc.connect(mute); mute.connect(ac.destination);
   // video frames (mirrored so the user's left = image left)
   const cv=$("c"), cx=cv.getContext("2d"); const frames=[]; const t0=performance.now(); let tick;
@@ -60,8 +64,10 @@ $("go").onclick = async () => {
   tick = setInterval(()=>{
     const t=performance.now()-t0; cx.save(); cx.translate(160,0); cx.scale(-1,1); cx.drawImage(v,0,0,160,120); cx.restore();
     frames.push(cv.toDataURL("image/jpeg",0.7).split(",")[1]);
-    $("count").textContent = Math.max(0,Math.ceil((DUR-t)/1000)); $("bar").style.width = Math.min(100,t/DUR*100)+"%";
-    if(t>=DUR){ clearInterval(tick); finish(); }
+    $("count").textContent = (Math.max(0,DUR-t)/1000).toFixed(1); $("bar").style.width = Math.min(100,t/DUR*100)+"%";
+    const done = spoke && (performance.now()-lastVoice)>HANG_MS && t>=MIN_MS;   // word finished + gesture window covered
+    if(spoke) $("msg").textContent="voice detected…";
+    if(t>=DUR || done){ clearInterval(tick); finish(); }
   }, 1000/FPS);
   async function finish(){
     const elapsed=(performance.now()-t0)/1000; const srcSr=ac.sampleRate;
