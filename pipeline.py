@@ -195,13 +195,15 @@ def mfcc(x, n_mfcc=13, frame=400, hop=160, n_fft=512):
     return dct(mel_spec, type=2, axis=1, norm="ortho")[:, :n_mfcc], mel_spec
 
 
-def voice_features(raw, use_filter=True):
+def voice_features(raw, use_filter=True, n_seg=4):
+    """MFCC with cepstral mean normalisation + delta, pooled over n_seg time segments
+    (keeps temporal order of the word) + global std."""
     x = voice_preprocess(raw, use_filter)
     m, _ = mfcc(x)
-    d1 = np.gradient(m, axis=0)
-    d2 = np.gradient(d1, axis=0)
-    f = np.concatenate([m, d1, d2], axis=1)
-    return np.concatenate([f.mean(0), f.std(0)]).astype(np.float32)
+    m = m - m.mean(0)                      # CMN: removes channel / loudness bias
+    f = np.concatenate([m, np.gradient(m, axis=0)], axis=1)
+    parts = np.array_split(f, n_seg, axis=0)
+    return np.concatenate([p.mean(0) for p in parts] + [f.std(0)]).astype(np.float32)
 
 
 # --------------------------------------------------------------------------
