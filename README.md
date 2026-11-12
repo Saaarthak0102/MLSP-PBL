@@ -3,7 +3,7 @@
 **Say how far. Swipe which way. The robot obeys.**
 GestVox is a multimodal human-robot interaction prototype. Your **voice** gives the distance ("three" → 3 cells) and a **hand gesture** seen by the webcam gives the direction (swipe left / right / up / down). A simulated robot on a 9×9 grid executes the combined command. If either input is unsure, the command is **rejected** instead of moving the robot wrongly.
 
-Live demo: *(add the Streamlit Cloud URL after deploying)*
+Live demo: [Streamlit Cloud URL](https://gestvox.streamlit.app/)
 
 ---
 
