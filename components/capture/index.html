@@ -20,14 +20,14 @@
   <div id="stage"><video id="v" playsinline muted></video><div id="idle">camera + mic preview<br>appears after you press start</div>
     <div id="guide"></div><div id="count"></div><div id="bar"></div></div>
   <div id="side">
-    <button id="go">▶ start (5 s capture)</button>
+    <button id="go">▶ start (3 s capture)</button>
     <div id="msg">Say one command (go / stop / left / right / up / down) and, at the same time, show a hand gesture:
       swipe left / right / up / down, hold an open palm (go) or a fist (stop). Keep your hand in front of your face, inside the dashed box.</div>
   </div>
 </div>
 <canvas id="c" width="160" height="120"></canvas>
 <script>
-const DUR = 5000, FPS = 10, TARGET_SR = 16000;
+const DUR = 3000, FPS = 10, TARGET_SR = 16000;
 const $ = id => document.getElementById(id);
 const send = (type, data) => window.parent.postMessage(Object.assign({isStreamlitMessage:true, type}, data), "*");
 const setH = () => send("streamlit:setFrameHeight", {height: 270});

@@ -7,7 +7,7 @@ Live demo: *(add Streamlit Cloud URL after deploy)*
 - **Gesture** — UCI *EMG data for gestures* (Lobov et al. 2018), 8-ch Myo EMG @200 Hz, 36 subjects, 6 gestures mapped to the same 6 commands. <https://archive.ics.uci.edu/dataset/481/emg+data+for+gestures>
 
 ## Live session (camera + mic)
-Press **start** in the *live session* tab -> allow camera + microphone -> 5 s auto-capture. The browser sends 16 kHz audio and ~10 fps 160x120 frames to Python, which measures and classifies both (all numbers shown are computed from your capture) and fuses them.
+Press **start** in the *live session* tab -> allow camera + microphone -> 3 s auto-capture. The browser sends 16 kHz audio and ~10 fps 160x120 frames to Python, which measures and classifies both (all numbers shown are computed from your capture) and fuses them.
 Gesture = classical OpenCV: Haar face masking, YCrCb skin segmentation, morphology, convex hull + convexity defects (finger count), centroid trajectory, frame-difference motion -> SVM / RF / k-NN on clip features. Gestures: swipe left/right/up/down, open palm (go), fist (stop).
 Note: the starter camera models are trained on synthetic hands rendered and passed through the same OpenCV pipeline; use *improve the gesture model* in the app to add your own labelled clips and retrain. Offline benchmark of the public datasets is in the *models* tab.
 
