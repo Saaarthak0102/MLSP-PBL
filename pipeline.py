@@ -408,12 +408,62 @@ def train():
     print("saved models/ + results.json")
 
 
+# --------------------------------------------------------------------------
+# Camera gesture (OpenCV) - classifier on clip-level features from vision.py
+# --------------------------------------------------------------------------
+CAM_REAL = os.path.join(ROOT, "assets", "cam_real.npz")   # user-recorded labelled clips (features)
+
+
+def train_cam(n_per_class=150):
+    """Train SVM / RF / k-NN on OpenCV trajectory+shape features.
+    Training clips = synthetic rendered hands run through the *same* OpenCV pipeline
+    + any real clips saved from the app (assets/cam_real.npz)."""
+    import joblib
+    import vision as V
+    from sklearn.model_selection import train_test_split
+    rng = np.random.default_rng(0)
+    X, y = [], []
+    for gi, g in enumerate(V.GESTURES):
+        for _ in range(n_per_class):
+            f, _, _ = V.analyze(V.synth_clip(g, rng))
+            X.append(f); y.append(gi)
+    n_syn = len(y)
+    n_real = 0
+    if os.path.exists(CAM_REAL):
+        d = np.load(CAM_REAL)
+        X += list(d["X"]); y += list(d["y"]); n_real = len(d["y"])
+    X, y = np.array(X), np.array(y)
+    tr, te = train_test_split(np.arange(len(y)), test_size=0.25, stratify=y, random_state=0)
+    out = {"n_synthetic": n_syn, "n_real": n_real, "gestures": V.GESTURES, "feature_names": V.FEATURE_NAMES, "models": {}}
+    fitted = {}
+    for name, m in make_models().items():
+        m.fit(X[tr], y[tr])
+        r = evaluate(m, X[te], y[te])
+        r["confusion"] = __import__("sklearn.metrics", fromlist=["x"]).confusion_matrix(
+            y[te], m.predict(X[te]), labels=range(len(V.GESTURES))).tolist()
+        out["models"][name] = r
+        fitted[name] = m
+        print(f"  camera {name:14s} acc={r['accuracy']:.3f} f1={r['f1']:.3f}")
+    # final models refit on all data
+    out["best"] = max(out["models"], key=lambda k: out["models"][k]["f1"])
+    allm = {k: make_models()[k].fit(X, y) for k in out["models"]}
+    joblib.dump(allm, os.path.join(MODEL_DIR, "cam_gesture.joblib"), compress=3)
+    rp = os.path.join(MODEL_DIR, "results.json")
+    res = json.load(open(rp)) if os.path.exists(rp) else {}
+    res["camera"] = out
+    json.dump(res, open(rp, "w"), indent=1)
+    print("saved cam_gesture.joblib + results.json[camera]")
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--download", action="store_true")
     ap.add_argument("--train", action="store_true")
+    ap.add_argument("--train-cam", action="store_true")
     a = ap.parse_args()
     if a.download:
         download_data()
     if a.train:
         train()
+    if a.train_cam:
+        train_cam()

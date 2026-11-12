@@ -1,18 +1,23 @@
 """Streamlit demo: HRI via Voice + Gesture.  Run:  streamlit run app.py"""
+import base64
 import glob
 import io
 import json
 import os
 import time
 
+import cv2
 import joblib
 import numpy as np
+import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+import streamlit.components.v1 as components
 from scipy import signal
 from scipy.io import wavfile
 
 import pipeline as P
+import vision as V
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 SAMPLES = os.path.join(ROOT, "assets", "samples")
@@ -78,17 +83,244 @@ def read_wav(src):
     return P.fix_length(w, P.SR)
 
 
+capture = components.declare_component("capture", path=os.path.join(ROOT, "components", "capture"))
+
+
+@st.cache_resource
+def load_cam():
+    return joblib.load(os.path.join(P.MODEL_DIR, "cam_gesture.joblib"))
+
+
+def move_robot(cmd):
+    x, y = st.session_state.pos
+    dx, dy = {"left": (-1, 0), "right": (1, 0), "up": (0, 1), "down": (0, -1)}.get(cmd, (0, 0))
+    if cmd in ("left", "right", "up", "down"):
+        st.session_state.dir = (dx, dy)
+    if cmd == "go":
+        dx, dy = st.session_state.dir
+    x, y = min(6, max(0, x + dx)), min(6, max(0, y + dy))
+    st.session_state.pos = (x, y)
+    st.session_state.trail = (st.session_state.trail + [(x, y)])[-12:]
+
+
+def robot_fig():
+    tx, ty = zip(*st.session_state.trail)
+    fig = go.Figure()
+    fig.add_scatter(x=tx, y=ty, mode="lines", line=dict(color=DIM, width=1, dash="dot"), showlegend=False)
+    fig.add_scatter(x=[st.session_state.pos[0]], y=[st.session_state.pos[1]], mode="markers",
+                    marker=dict(symbol="square", size=26, color=ACCENT), showlegend=False)
+    fig.update_xaxes(range=[-.5, 6.5], dtick=1, showticklabels=False)
+    fig.update_yaxes(range=[-.5, 6.5], dtick=1, showticklabels=False, scaleanchor="x")
+    return style(fig, 280)
+
+
+def audio_stats(x):
+    """Real measurements on the captured audio + start of the most energetic 1 s window."""
+    fl, hop = 400, 160
+    n = 1 + (len(x) - fl) // hop
+    idx = np.arange(fl)[None] + hop * np.arange(n)[:, None]
+    en = (x[idx] ** 2).mean(1) + 1e-12
+    noise = np.percentile(en, 10)
+    thr = max(noise * 8, 0.1 * en.max())
+    voiced = en > thr
+    sig = en[voiced].mean() if voiced.any() else noise
+    cs = np.r_[0, np.cumsum(en)]
+    w = P.SR // hop
+    best = int(np.argmax(cs[w:] - cs[:-w])) if n > w else 0
+    start = min(best * hop, max(len(x) - P.SR, 0))
+    return dict(duration=len(x) / P.SR, rms=float(np.sqrt((x ** 2).mean())), peak=float(np.abs(x).max()),
+                voiced_pct=float(voiced.mean()), snr_db=float(10 * np.log10(sig / noise)), start=start)
+
+
+def process_session(data):
+    T = {}
+    t = time.perf_counter()
+    x = np.frombuffer(base64.b64decode(data["audio"]), dtype=np.int16).astype(np.float32) / 32768.0
+    frames = V.decode_jpegs([base64.b64decode(f) for f in data["frames"]])
+    T["decode"] = time.perf_counter() - t
+    # ---- voice: locate word, band-pass/VAD, MFCC, classify
+    t = time.perf_counter()
+    A = audio_stats(x)
+    win = P.fix_length(x[A["start"]:A["start"] + P.SR], P.SR)
+    proc = P.voice_preprocess(win, True)
+    pv_ok = A["peak"] > 0.02 and A["voiced_pct"] > 0.03
+    pv = mv.predict_proba(P.voice_features(win)[None])[0] if pv_ok else np.ones(len(CMDS)) / len(CMDS)
+    T["voice DSP + model"] = time.perf_counter() - t
+    # ---- gesture: OpenCV
+    t = time.perf_counter()
+    if len(frames) >= 5:
+        feat, S, over = V.analyze(frames)
+    else:
+        feat, S, over = np.zeros(len(V.FEATURE_NAMES), np.float32), None, []
+    T["OpenCV analysis"] = time.perf_counter() - t
+    t = time.perf_counter()
+    cam = load_cam()
+    g_ok = S is not None and S["detected"].mean() >= 0.2
+    per_model = {}
+    for name, m in cam.items():
+        pr = m.predict_proba(feat[None])[0]
+        pc = np.zeros(len(CMDS))
+        for gi, g in enumerate(V.GESTURES):
+            pc[CMDS.index(V.GESTURE_TO_CMD[g])] = pr[gi]
+        per_model[name] = pc
+    best_cam = load_results()["camera"]["best"]
+    pg = per_model[best_cam] if g_ok else np.ones(len(CMDS)) / len(CMDS)
+    pf = P.fuse(pv[None], pg[None], "confidence")[0]
+    T["classify + fuse"] = time.perf_counter() - t
+    return dict(A=A, x=x, win=win, proc=proc, pv=pv, pv_ok=pv_ok, S=S, over=over, feat=feat, pg=pg, g_ok=g_ok,
+                per_model=per_model, best_cam=best_cam, pf=pf, T=T, n_frames=len(frames), elapsed=data["elapsed"], id=data["id"])
+
+
+def render_session(R):
+    A, S = R["A"], R["S"]
+    vcmd, gcmd = CMDS[int(R["pv"].argmax())], CMDS[int(R["pg"].argmax())]
+    none = not R["pv_ok"] and not R["g_ok"]
+    fcmd = None if none else CMDS[int(R["pf"].argmax())]
+    st.markdown("### result")
+    c1, c2 = st.columns([3, 2], gap="large")
+    with c1:
+        st.markdown(f'<div class="lbl">fused command</div><div class="big">{fcmd.upper() if fcmd else "NO INPUT"}</div>', unsafe_allow_html=True)
+        parts = [f"Heard **{vcmd}** ({R['pv'].max():.0%})" if R["pv_ok"] else "No speech detected (audio too quiet)",
+                 f"saw a gesture for **{gcmd}** ({R['pg'].max():.0%})" if R["g_ok"] else "no hand detected"]
+        st.markdown(", ".join(parts) + (f" → **executing {fcmd.upper()}**." if fcmd else "."))
+        wv, wg = P.entropy_weight(R["pv"][None])[0], P.entropy_weight(R["pg"][None])[0]
+        if R["pv_ok"] and R["g_ok"]:
+            if vcmd == gcmd:
+                st.markdown("✓ voice and gesture **agree**.")
+            else:
+                st.markdown(f"⚠ they **disagree** — fusion trusted **{'voice' if wv > wg else 'gesture'}** more (higher confidence).")
+        df = pd.DataFrame({"command": CMDS, "voice": R["pv"], "gesture": R["pg"], "fused": R["pf"]}).set_index("command")
+        st.dataframe(df, use_container_width=True, column_config={
+            c: st.column_config.ProgressColumn(c, min_value=0.0, max_value=1.0, format="%.3f") for c in df.columns})
+        st.caption(f"confidence weights (1 − normalised entropy): voice {wv:.2f} · gesture {wg:.2f}")
+    with c2:
+        st.metric("total processing", f"{sum(R['T'].values()) * 1000:.0f} ms")
+        st.dataframe(pd.DataFrame({"stage": list(R["T"]), "ms": [v * 1000 for v in R["T"].values()]}).set_index("stage").style.format("{:.1f}"),
+                     use_container_width=True)
+        st.plotly_chart(robot_fig(), use_container_width=True, key="robot_sess")
+
+    Hh = st.session_state.get("history", [])
+    if Hh:
+        st.markdown("#### agreement matrix · all runs this session")
+        hd = pd.DataFrame(Hh)
+        ct = pd.crosstab(hd["voice"], hd["gesture"])
+        ct = ct.reindex(index=CMDS + ["—"], columns=CMDS + ["—"], fill_value=0)
+        fig = go.Figure(go.Heatmap(z=ct.values, x=list(ct.columns), y=list(ct.index), text=ct.values, texttemplate="%{text}",
+                                   colorscale=[[0, BG], [1, ACCENT]], showscale=False))
+        fig.update_yaxes(autorange="reversed", title="voice").update_xaxes(title="gesture")
+        st.plotly_chart(style(fig, 320), use_container_width=True, key="agree_mat")
+        st.caption("rows = voice prediction · columns = gesture prediction · diagonal = agreement")
+        st.dataframe(hd, hide_index=True, use_container_width=True)
+
+    st.markdown("### voice · measured")
+    m = st.columns(5)
+    m[0].metric("captured", f"{A['duration']:.2f} s")
+    m[1].metric("peak", f"{20 * np.log10(A['peak'] + 1e-9):.1f} dBFS")
+    m[2].metric("RMS", f"{A['rms']:.4f}")
+    m[3].metric("voiced", f"{A['voiced_pct']:.0%}")
+    m[4].metric("est. SNR", f"{A['snr_db']:.1f} dB")
+    t5 = np.arange(len(R["x"])) / P.SR
+    fig = go.Figure()
+    fig.add_scatter(x=t5[::8], y=R["x"][::8], line=dict(color=DIM, width=1), name="captured")
+    fig.add_vrect(x0=A["start"] / P.SR, x1=A["start"] / P.SR + 1, fillcolor=ACCENT, opacity=.15, line_width=0)
+    fig.update_layout(title="capture · shaded = 1 s window classified").update_xaxes(title="s")
+    a, b, c = st.columns(3)
+    a.plotly_chart(style(fig, 240), use_container_width=True)
+    mf, mel = P.mfcc(R["proc"])
+    b.plotly_chart(style(go.Figure(go.Heatmap(z=mel.T, colorscale="Viridis", showscale=False)).update_layout(title="log-mel (band-pass + VAD)"), 240), use_container_width=True)
+    c.plotly_chart(style(go.Figure(go.Heatmap(z=mf.T, colorscale="Magma", showscale=False)).update_layout(title="MFCC"), 240), use_container_width=True)
+    if not R["pv_ok"]:
+        st.warning("Audio too quiet / no speech found — voice ignored in fusion.")
+
+    st.markdown("### gesture · measured (OpenCV)")
+    if S is None:
+        st.warning("Too few video frames received.")
+        return
+    m = st.columns(5)
+    m[0].metric("frames", R["n_frames"])
+    m[1].metric("effective fps", f"{R['n_frames'] / max(R['elapsed'], 1e-6):.1f}")
+    m[2].metric("hand detected", f"{S['detected'].mean():.0%}")
+    m[3].metric("net motion", f"dx {R['feat'][0]:+.2f} dy {R['feat'][1]:+.2f}")
+    m[4].metric("mean fingers", f"{R['feat'][3]:.1f}")
+    pick = np.linspace(0, len(R["over"]) - 1, 6).astype(int)
+    st.image(np.hstack([cv2.cvtColor(R["over"][i], cv2.COLOR_BGR2RGB) for i in pick]),
+             caption="face (grey) · hand contour (blue) · convex hull (green) · centroid (red)", width="stretch")
+    st.image(np.hstack([S["masks"][i] for i in pick]), caption="skin mask after morphology", width="stretch")
+    a, b = st.columns(2)
+    fig = go.Figure()
+    fig.add_scatter(x=S["cx"], y=-S["cy"], mode="lines+markers", line=dict(color=ACCENT),
+                    marker=dict(size=4, color=np.arange(len(S["cx"])), colorscale="Viridis"))
+    fig.update_layout(title="hand centroid trajectory (colour = time)").update_xaxes(range=[0, 1], title="x").update_yaxes(range=[-1, 0], title="y")
+    a.plotly_chart(style(fig, 300), use_container_width=True)
+    fig = go.Figure()
+    fig.add_scatter(y=S["fingers"], name="fingers", line=dict(color=AMBER))
+    fig.add_scatter(y=S["area"] * 100, name="area %", line=dict(color="#6fa8ff"))
+    fig.add_scatter(y=S["motion"], name="motion energy", line=dict(color=DIM))
+    fig.update_layout(title="per-frame series").update_xaxes(title="frame")
+    b.plotly_chart(style(fig, 300), use_container_width=True)
+    st.markdown("**gesture classifiers on this clip**")
+    rows = [{"model": n + (" ★" if n == R["best_cam"] else ""), "command": CMDS[int(pc.argmax())], "confidence": float(pc.max())}
+            for n, pc in R["per_model"].items()]
+    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True,
+                 column_config={"confidence": st.column_config.NumberColumn(format="%.3f")})
+    st.dataframe(pd.DataFrame([R["feat"]], columns=V.FEATURE_NAMES).style.format("{:.3f}"), hide_index=True, use_container_width=True)
+    if not R["g_ok"]:
+        st.warning("Hand not found in enough frames — gesture ignored in fusion. Try brighter light and a plain background.")
+
+    with st.expander("improve the gesture model with your own data"):
+        lab = st.selectbox("gesture you just performed", V.GESTURES)
+        c1, c2 = st.columns(2)
+        if c1.button("save this clip as a training sample"):
+            fp = P.CAM_REAL
+            if os.path.exists(fp):
+                d = np.load(fp)
+                X0, y0 = list(d["X"]), list(d["y"])
+            else:
+                X0, y0 = [], []
+            X0.append(R["feat"]); y0.append(V.GESTURES.index(lab))
+            np.savez_compressed(fp, X=np.array(X0), y=np.array(y0))
+            st.success(f"saved ({len(y0)} real clips total)")
+        if c2.button("retrain camera models now"):
+            with st.spinner("training…"):
+                P.train_cam(n_per_class=100)
+            load_cam.clear(); load_results.clear()
+            st.success("retrained — record again to use the new models")
+
+
 res, (mv, mg) = load_results(), load_models()
 CMDS = res["commands"]
 rng = np.random.default_rng(int(time.time()) % 1000)
 
 st.markdown('<div class="hdr">HRI/CMD <span>· voice + gesture command fusion · MLSP PBL</span></div>', unsafe_allow_html=True)
-t_live, t_sig, t_mod, t_fus = st.tabs(["live", "signal chain", "models", "fusion study"])
+t_sess, t_live, t_sig, t_mod, t_fus = st.tabs(["live session", "dataset replay", "signal chain", "models", "fusion study"])
 
-# ----------------------------------------------------------------- LIVE
+if "pos" not in st.session_state:
+    st.session_state.pos, st.session_state.trail, st.session_state.dir = (3, 3), [(3, 3)], (0, 1)
+
+# ----------------------------------------------------------------- LIVE SESSION (camera + mic)
+with t_sess:
+    data = capture(key="cap", default=None)
+    if data and data.get("id") != st.session_state.get("last_id"):
+        st.session_state.last_id = data["id"]
+        with st.status("processing capture…") as status:
+            R = process_session(data)
+            st.session_state.sess = R
+            fc = None if (not R["pv_ok"] and not R["g_ok"]) else CMDS[int(R["pf"].argmax())]
+            if fc:
+                move_robot(fc)
+            hist = st.session_state.setdefault("history", [])
+            hist.append(dict(run=len(hist) + 1, voice=CMDS[int(R["pv"].argmax())] if R["pv_ok"] else "—",
+                             gesture=CMDS[int(R["pg"].argmax())] if R["g_ok"] else "—", executed=fc or "—",
+                             snr_db=round(R["A"]["snr_db"], 1),
+                             hand_pct=round(float(R["S"]["detected"].mean()) if R["S"] else 0, 2)))
+            status.update(label="done", state="complete")
+    if st.session_state.get("sess"):
+        render_session(st.session_state.sess)
+    else:
+        st.info("No capture yet. Press **start** above — the browser asks for camera + microphone permission the first time.")
+
+# ----------------------------------------------------------------- DATASET REPLAY
 with t_live:
-    if "pos" not in st.session_state:
-        st.session_state.pos, st.session_state.trail, st.session_state.dir = (3, 3), [(3, 3)], (0, 1)
     left, right = st.columns([3, 2], gap="large")
     with left:
         st.markdown('<div class="lbl">1 · voice input</div>', unsafe_allow_html=True)
@@ -121,15 +353,7 @@ with t_live:
         ms = (time.perf_counter() - t0) * 1000
         cmd = CMDS[int(pf.argmax())]
         st.session_state.last = dict(pv=pv[0], pg=pg[0], pf=pf[0], ms=ms, cmd=cmd, xv=xv)
-        x, y = st.session_state.pos
-        dx, dy = {"left": (-1, 0), "right": (1, 0), "up": (0, 1), "down": (0, -1)}.get(cmd, (0, 0))
-        if cmd in ("left", "right", "up", "down"):
-            st.session_state.dir = (dx, dy)
-        if cmd == "go":
-            dx, dy = st.session_state.dir
-        x, y = min(6, max(0, x + dx)), min(6, max(0, y + dy))
-        st.session_state.pos = (x, y)
-        st.session_state.trail = (st.session_state.trail + [(x, y)])[-12:]
+        move_robot(cmd)
 
     with right:
         L = st.session_state.get("last")
@@ -145,15 +369,8 @@ with t_live:
                 fig.add_bar(x=CMDS, y=L[key], name=name, marker_color=col)
             fig.update_layout(barmode="group")
             st.plotly_chart(style(fig, 220), use_container_width=True)
-        tx, ty = zip(*st.session_state.trail)
-        fig = go.Figure()
-        fig.add_scatter(x=tx, y=ty, mode="lines", line=dict(color=DIM, width=1, dash="dot"), showlegend=False)
-        fig.add_scatter(x=[st.session_state.pos[0]], y=[st.session_state.pos[1]], mode="markers",
-                        marker=dict(symbol="square", size=26, color=ACCENT), showlegend=False)
-        fig.update_xaxes(range=[-.5, 6.5], dtick=1, showticklabels=False)
-        fig.update_yaxes(range=[-.5, 6.5], dtick=1, showticklabels=False, scaleanchor="x")
         st.markdown('<div class="lbl">robot (7×7 grid)</div>', unsafe_allow_html=True)
-        st.plotly_chart(style(fig, 280), use_container_width=True)
+        st.plotly_chart(robot_fig(), use_container_width=True, key="robot_live")
         if st.button("reset robot"):
             st.session_state.pos, st.session_state.trail = (3, 3), [(3, 3)]
             st.rerun()
